@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cuenta de Cobro · Guillermo Ortiz</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,400;0,600;0,700;1,400&family=Outfit:wght@300;400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5.0.4/dist/tesseract.min.js"></script>
+</head>
+<body>
+
+  <div class="grain"></div>
+  <div class="bg-glow"></div>
+
+  <main class="container">
+
+    <header class="header">
+      <p class="header-eyebrow">Sistema de Facturación · Colombia</p>
+      <h1 class="header-title">Cuenta <em>de Cobro</em></h1>
+      <p class="header-sub">Generación automática desde notas manuscritas</p>
+      <div class="header-rule">
+        <span class="rule-line"></span>
+        <span class="rule-badge">COL · COP</span>
+        <span class="rule-line"></span>
+      </div>
+    </header>
+
+    <!-- Datos del emisor: ocultos, ya precargados -->
+    <input id="emisor_nombre"    type="hidden" value="Guillermo León Ortiz Gutiérrez" />
+    <input id="emisor_cc"        type="hidden" value="98487799" />
+    <input id="emisor_direccion" type="hidden" value="Carrera 22B No. 56BB-14, INT 221" />
+    <input id="emisor_telefono"  type="hidden" value="4473186" />
+    <input id="emisor_celulares" type="hidden" value="3045878522, 3117574575" />
+    <input id="emisor_cuenta"    type="hidden" value="54000004739" />
+
+    <!-- Datos del deudor: ocultos, ya precargados -->
+    <input id="deudor_nombre" type="hidden" value="PIXADES S.A.S" />
+    <input id="deudor_nit"    type="hidden" value="900577197-3" />
+
+    <!-- PASO 1 -->
+    <section class="card" style="--delay:.10s">
+      <div class="card-head">
+        <span class="step-num">01</span>
+        <div>
+          <h2>Datos variables</h2>
+          <p class="card-desc">Número de cuenta, fecha de emisión y proyecto</p>
+        </div>
+      </div>
+      <div class="grid-2">
+        <label>
+          <span class="label-text">Número de cuenta</span>
+          <input id="num_cuenta" type="text" value="0005" />
+        </label>
+        <label>
+          <span class="label-text">Fecha de emisión</span>
+          <input id="fecha_emision" type="date" />
+        </label>
+        <label class="span-2">
+          <span class="label-text">Obra / Proyecto (referencia base)</span>
+          <input id="obra_nombre" type="text" placeholder="Se auto-rellena desde la imagen por factura" />
+        </label>
+      </div>
+    </section>
+
+    <!-- PASO 2 -->
+    <section class="card" style="--delay:.20s">
+      <div class="card-head">
+        <span class="step-num">02</span>
+        <div>
+          <h2>Nota manuscrita</h2>
+          <p class="card-desc">Carga la imagen para extraer automáticamente los datos con IA</p>
+        </div>
+      </div>
+
+      <div class="upload-zone" id="uploadZone">
+        <input type="file" id="fileInput" accept="image/*" hidden />
+        <div class="upload-content">
+          <div class="upload-icon">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+          </div>
+          <p class="upload-title">No ha ingresado imagen</p>
+          <p class="upload-hint">Arrastra o haz clic para seleccionar &nbsp;·&nbsp; JPG, PNG, WebP</p>
+        </div>
+      </div>
+
+      <div class="preview" id="preview" hidden>
+        <div class="preview-check">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>
+        </div>
+        <p class="file-loaded" id="fileName">Imagen cargada</p>
+        <button class="btn-ghost" id="clearBtn">Quitar</button>
+      </div>
+
+      <div class="actions">
+        <button class="btn-primary" id="extractBtn" disabled>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          Extraer datos con IA
+        </button>
+      </div>
+
+      <div class="status" id="status" hidden>
+        <div class="status-bar"><div class="status-fill" id="statusFill"></div></div>
+        <p class="status-text" id="statusText">Procesando…</p>
+      </div>
+    </section>
+
+    <!-- PASO 3: Facturas detectadas, generadas dinámicamente por app.js -->
+    <div id="invoicesContainer"></div>
+
+    <!-- PASO 4 -->
+    <section class="card card-generate" id="generateCard" hidden style="--delay:0s">
+      <div class="card-head">
+        <span class="step-num">03</span>
+        <div>
+          <h2>Generar documento</h2>
+          <p class="card-desc">Descarga la cuenta de cobro en formato PDF</p>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="btn-generate" id="generatePdfBtn">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+          </svg>
+          <span id="generateLabel">Generar y descargar PDF</span>
+        </button>
+      </div>
+    </section>
+
+  </main>
+
+  <script src="auth.js"></script>
+  <script>
+    // Redirige al login si la sesión no está activa
+    if (!Auth.isAuthenticated()) {
+      location.replace("login.html");
+    }
+  </script>
+  <script src="extractor.js"></script>
+  <script src="pdf-generator.js"></script>
+  <script src="app.js"></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const fechaInput = document.getElementById("fecha_emision");
+      if (fechaInput && !fechaInput.value) {
+        fechaInput.value = new Date().toISOString().slice(0, 10);
+      }
+    });
+  </script>
+</body>
+</html>
