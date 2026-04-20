@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "WebFetch(domain:drive.google.com)"
+      "WebFetch(domain:drive.google.com)",
+      "WebSearch",
+      "WebFetch(domain:docs.mistral.ai)",
+      "WebFetch(domain:help.mistral.ai)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:www.datacamp.com)"
     ]
   }
 }

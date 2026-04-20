@@ -1,237 +1,208 @@
 /**
  * extractor.js
- * Módulo de extracción de datos desde imágenes manuscritas.
- *
- * Estrategia principal: Gemini Vision API (gemini-2.5-flash).
- * Fallback: Tesseract.js OCR + heurísticas.
+ * Extracción de datos desde imágenes manuscritas.
+ * Pipeline: preprocesamiento canvas → Tesseract.js OCR → heurísticas.
  */
 
 const Extractor = (() => {
 
-  const GEMINI_API_KEY = "AIzaSyA9RElfkS4S0T9akN_wuGJ__T_FgbtcxQE";
-  const GEMINI_ENDPOINT =
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-
-  const PROMPT = `Eres un sistema de extracción de datos de cuentas de cobro manuscritas en español colombiano.
-La imagen puede contener UNA o VARIAS cuentas de cobro / notas de obra separadas por título, encabezado o sección visual distinta.
-
-Devuelve EXCLUSIVAMENTE un array JSON válido (siempre array, aunque solo haya una cuenta):
-
-[
-  {
-    "obra": "<nombre de la obra o proyecto, o null>",
-    "numeroCuenta": "<número de cuenta si aparece, con ceros a la izquierda de 4 dígitos, o null>",
-    "fechaEmision": "<fecha global del documento YYYY-MM-DD, o null>",
-    "items": [
-      {
-        "fecha": "YYYY-MM-DD",
-        "descripcion": "<descripción del servicio o material>",
-        "valor": <entero COP, sin puntos ni comas>
-      }
-    ],
-    "total": <suma entera>,
-    "moneda": "COP",
-    "confianza_extraccion": <0 a 1>
-  }
-]
-
-Reglas:
-- Retorna SIEMPRE un array, incluso si hay solo una cuenta.
-- Si hay varias cuentas en la hoja, incluye TODAS como elementos del array.
-- Años "26" → "2026". Valores "950.000" → 950000.
-- fechaEmision es la fecha del encabezado del documento, no la de los ítems.
-- numeroCuenta: "No. 5", "#5", "Cuenta 5" → "0005".
-- No inventes datos. Campo no legible → null.
-- No incluyas texto fuera del JSON.`;
-
   /**
-   * Extracción con Gemini Vision API.
+   * Preprocesa la imagen: escala de grises, contraste y binarización.
+   * Mejora significativamente la legibilidad para Tesseract.
    */
-  async function extractWithGemini(imageFile, onProgress) {
-    onProgress(0.15, "Enviando imagen a Gemini...");
+  function preprocessImage(imageFile) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      const url = URL.createObjectURL(imageFile);
 
-    const base64 = await fileToBase64(imageFile);
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        // Escalar a un ancho mínimo de 1800px para mejor OCR
+        const scale = Math.max(1, 1800 / img.width);
+        canvas.width  = Math.round(img.width  * scale);
+        canvas.height = Math.round(img.height * scale);
 
-    const payload = {
-      contents: [
-        {
-          parts: [
-            {
-              inlineData: {
-                mimeType: imageFile.type,
-                data: base64
-              }
-            },
-            { text: PROMPT }
-          ]
+        const ctx = canvas.getContext("2d");
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const d = imageData.data;
+
+        for (let i = 0; i < d.length; i += 4) {
+          // Escala de grises (luminancia perceptual)
+          const gray = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+          // Contraste (factor 1.6)
+          const contrasted = Math.min(255, Math.max(0, (gray - 128) * 1.6 + 128));
+          // Binarización adaptativa simple (umbral 145)
+          const binary = contrasted > 145 ? 255 : 0;
+          d[i] = d[i + 1] = d[i + 2] = binary;
+          // Alpha sin cambios
         }
-      ],
-      generationConfig: {
-        responseMimeType: "application/json",
-        temperature: 0
-      }
-    };
 
-    const response = await fetch(GEMINI_ENDPOINT, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+        ctx.putImageData(imageData, 0, 0);
+        URL.revokeObjectURL(url);
+
+        canvas.toBlob(blob => {
+          if (blob) resolve(blob);
+          else reject(new Error("Error al preprocesar la imagen"));
+        }, "image/png");
+      };
+
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error("No se pudo cargar la imagen"));
+      };
+
+      img.src = url;
     });
-
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Gemini API error ${response.status}: ${errText}`);
-    }
-
-    onProgress(0.85, "Procesando respuesta de Gemini...");
-
-    const data = await response.json();
-    const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
-    if (!rawText) throw new Error("Gemini no devolvió contenido");
-
-    return parseJsonResponse(rawText);
   }
 
   /**
-   * OCR cliente con Tesseract.js (fallback sin conexión).
+   * OCR con Tesseract.js sobre imagen preprocesada.
    */
   async function extractWithTesseract(imageFile, onProgress) {
+    onProgress(0.10, "Preprocesando imagen...");
+    const processedBlob = await preprocessImage(imageFile);
+
+    onProgress(0.25, "Iniciando reconocimiento OCR...");
     const worker = await Tesseract.createWorker("spa", 1, {
       logger: (m) => {
         if (m.status === "recognizing text" && onProgress) {
-          onProgress(m.progress, "Reconociendo texto (OCR fallback)...");
+          const p = 0.25 + m.progress * 0.60;
+          onProgress(p, "Reconociendo texto...");
         }
       }
     });
 
-    const { data: { text } } = await worker.recognize(imageFile);
+    const { data: { text } } = await worker.recognize(processedBlob);
     await worker.terminate();
 
+    onProgress(0.90, "Analizando datos extraídos...");
     return normalizeExtraction(text);
   }
 
   /**
    * Normalizador heurístico para texto OCR crudo.
+   * Orientado al formato de cuentas de cobro colombianas.
    */
   function normalizeExtraction(rawText) {
     const lines = rawText
       .split(/\n+/)
       .map(l => l.trim())
-      .filter(l => l.length > 3);
+      .filter(l => l.length > 2);
 
-    let obra = null;
-    let numeroCuenta = null;
-    let fechaEmision = null;
-    const items = [];
+    let obra          = null;
+    let numeroCuenta  = null;
+    let fechaEmision  = null;
+    const items       = [];
 
-    const headerRegex = /obra[:\s]+([A-Za-zÁÉÍÓÚÑáéíóúñ0-9\s]+)/i;
-    const dateRegex = /(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})/;
-    const moneyRegex = /([\d]{1,3}(?:[.,]\d{3})+|\d{4,7})/g;
-    const cuentaRegex = /(?:cuenta[^\d]*|n[°oºO][:\s.]*|#\s*)(\d{1,6})/i;
+    // Patrones
+    const dateRegex   = /(\d{1,2})[\/\-.\s](\d{1,2})[\/\-.\s](\d{2,4})/;
+    const moneyRegex  = /\$?\s*([\d]{1,3}(?:[.,]\d{3})+|\d{4,9})/g;
+    const cuentaRegex = /(?:cuenta[^\d]*|n[°oºO][:\s.]*|#\s*|factura[^\d]*)(\d{1,6})/i;
+    const obraRegex   = /(?:obra|proyecto|referencia)[:\s]+([A-Za-zÁÉÍÓÚÑáéíóúñ0-9\s\-]+)/i;
+
+    // Conjunto de palabras a ignorar como descripción
+    const skipWords = /^(fecha|total|valor|subtotal|iva|nit|cc|cuenta|factura|cobro|obra|proyecto)$/i;
 
     for (const line of lines) {
+      // Número de cuenta
       if (!numeroCuenta) {
         const m = line.match(cuentaRegex);
         if (m) numeroCuenta = m[1].padStart(4, "0");
       }
 
-      const headerMatch = line.match(headerRegex);
-      if (headerMatch && !obra) {
-        obra = headerMatch[1].trim().toUpperCase();
-        continue;
+      // Nombre de obra
+      if (!obra) {
+        const m = line.match(obraRegex);
+        if (m) obra = m[1].trim().replace(/\s+/g, " ").toUpperCase();
       }
 
-      const dateMatch = line.match(dateRegex);
+      const dateMatch   = line.match(dateRegex);
       const moneyMatches = [...line.matchAll(moneyRegex)];
 
+      // Fecha de emisión (línea con fecha pero sin valor monetario)
       if (dateMatch && moneyMatches.length === 0 && !fechaEmision) {
-        const [, d, m, y] = dateMatch;
-        const year = y.length === 2 ? `20${y}` : y;
-        fechaEmision = `${year}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
+        fechaEmision = parseDate(dateMatch);
         continue;
       }
 
+      // Ítem: línea con fecha Y valor
       if (dateMatch && moneyMatches.length > 0) {
-        const [, d, m, y] = dateMatch;
-        const year = y.length === 2 ? `20${y}` : y;
-        const fecha = `${year}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
-
-        const rawValue = moneyMatches[moneyMatches.length - 1][1];
-        const valor = parseInt(rawValue.replace(/[.,]/g, ""), 10);
+        const fecha  = parseDate(dateMatch);
+        const rawVal = moneyMatches[moneyMatches.length - 1][1];
+        const valor  = parseInt(rawVal.replace(/[.,]/g, ""), 10);
 
         let descripcion = line
           .replace(dateRegex, "")
-          .replace(moneyRegex, "")
+          .replace(/\$?\s*[\d]{1,3}(?:[.,]\d{3})+/g, "")
+          .replace(/\d{4,9}/g, "")
           .replace(/[^\wáéíóúñÁÉÍÓÚÑ\s]/gi, " ")
           .replace(/\s+/g, " ")
           .trim();
 
-        if (descripcion.length < 3) descripcion = "transporte de un viaje";
+        if (descripcion.length < 3 || skipWords.test(descripcion)) {
+          descripcion = "transporte de un viaje";
+        }
 
-        if (valor > 10000 && valor < 50000000) {
+        if (valor > 5000 && valor < 100_000_000) {
           items.push({ fecha, descripcion, valor });
           if (!fechaEmision) fechaEmision = fecha;
+        }
+        continue;
+      }
+
+      // Línea solo con valor (sin fecha) → ítem sin fecha explícita
+      if (!dateMatch && moneyMatches.length > 0) {
+        const rawVal = moneyMatches[moneyMatches.length - 1][1];
+        const valor  = parseInt(rawVal.replace(/[.,]/g, ""), 10);
+
+        const descripcion = line
+          .replace(/\$?\s*[\d]{1,3}(?:[.,]\d{3})+/g, "")
+          .replace(/\d{4,9}/g, "")
+          .replace(/[^\wáéíóúñÁÉÍÓÚÑ\s]/gi, " ")
+          .replace(/\s+/g, " ")
+          .trim();
+
+        if (
+          descripcion.length >= 4 &&
+          !skipWords.test(descripcion) &&
+          valor > 5000 && valor < 100_000_000
+        ) {
+          items.push({ fecha: fechaEmision ?? null, descripcion, valor });
         }
       }
     }
 
-    const total = items.reduce((sum, it) => sum + it.valor, 0);
+    const total = items.reduce((s, it) => s + it.valor, 0);
 
-    // Siempre retorna array
     return [{
-      obra: obra ?? null,
-      numeroCuenta: numeroCuenta ?? null,
-      fechaEmision: fechaEmision ?? null,
+      obra:                 obra ?? null,
+      numeroCuenta:         numeroCuenta ?? null,
+      fechaEmision:         fechaEmision ?? null,
       items,
       total,
-      moneda: "COP",
-      confianza_extraccion: items.length > 0 ? 0.65 : 0.1
+      moneda:               "COP",
+      confianza_extraccion: items.length > 0 ? 0.72 : 0.15
     }];
   }
 
-  /**
-   * Parsea respuesta JSON (array o objeto), tolera ```json``` fences.
-   * Siempre devuelve un array.
-   */
-  function parseJsonResponse(text) {
-    const cleaned = text.replace(/```json|```/g, "").trim();
-    const firstArr = cleaned.indexOf("[");
-    const firstObj = cleaned.indexOf("{");
-    const useArr   = firstArr !== -1 && (firstObj === -1 || firstArr < firstObj);
-    const open  = useArr ? "[" : "{";
-    const close = useArr ? "]" : "}";
-    const start = cleaned.indexOf(open);
-    const end   = cleaned.lastIndexOf(close);
-    if (start === -1 || end === -1) throw new Error("Respuesta sin JSON válido");
-    const parsed = JSON.parse(cleaned.slice(start, end + 1));
-    return Array.isArray(parsed) ? parsed : [parsed];
-  }
-
-  function fileToBase64(file) {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.onload = () => resolve(reader.result.split(",")[1]);
-      reader.onerror = () => reject(new Error("Error leyendo el archivo"));
-      reader.readAsDataURL(file);
-    });
+  function parseDate([, d, m, y]) {
+    const year = y.length === 2 ? `20${y}` : y;
+    return `${year}-${m.padStart(2, "0")}-${d.padStart(2, "0")}`;
   }
 
   /**
-   * Punto de entrada: Gemini primero, Tesseract como fallback.
+   * Punto de entrada principal.
    */
   async function extractInvoiceData(imageFile, onProgress = () => {}) {
-    try {
-      return await extractWithGemini(imageFile, onProgress);
-    } catch (err) {
-      console.warn("Gemini falló, usando Tesseract como fallback:", err.message);
-      onProgress(0.1, "Gemini no disponible, usando OCR local...");
-      return await extractWithTesseract(imageFile, onProgress);
-    }
+    return await extractWithTesseract(imageFile, onProgress);
   }
 
   return {
     extractInvoiceData,
-    extractWithGemini,
     extractWithTesseract,
     normalizeExtraction
   };
